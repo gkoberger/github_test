@@ -1,0 +1,768 @@
+<?php
+/**
+ * CourseCollection
+ * Get courses based on params
+ *
+ * @version 0.1
+ * @author Gregory Koberger
+ */
+
+ini_set("memory_limit","50M");
+
+class CourseCollection extends Schedule {
+    private $quarter;
+
+    private $_params;
+    private $results;
+    private $query_courses;
+    private $query_courses_sub;
+    private $query_sections;
+    private $filter;
+    private $is_null = false;
+    private $ccdb;
+    private $selectors_clean = array();
+    private $courses_order = array();
+    private $sort_by = array();
+
+    private $sub_coursecollections = array();
+
+    public static $sort_types = array('alphabetical'=>'alphabetical|asc',
+            'course'=>'course id|asc',
+            'discipline'=>'discipline|asc');
+    public static $sort_type_default = 'course';
+    public static $sort_cookie = 'x_sort_by';
+
+    static function sortTypes() {
+        return self::$sort_types;
+    }
+
+    static function addSortType($key, $val=false, $default = false) {
+        if(count($this->sub_coursecollections) > 0) {
+            foreach($this->sub_coursecollections as $k=>$v) {
+                $this->sub_coursecollections[$k]->addSortType($key, $val, $default);
+            }
+        }
+
+        self::$sort_types[$key] = !empty($val) ? $val : $key;
+        if($default) self::$sort_type_default = $key;
+    }
+
+    static function setSortCookie($cookie) {
+        if(count($this->sub_coursecollections) > 0) {
+            foreach($this->sub_coursecollections as $k=>$v) {
+                $this->sub_coursecollections[$k]->setSortCookie($cookie);
+            }
+        }
+
+        self::$sort_cookie = $cookie;
+    }
+
+    static function getSortCookie() {
+        return self::$sort_cookie;
+    }
+
+    static function getSortType() {
+
+        $sort_by = !empty($_COOKIE[self::$sort_cookie]) ? $_COOKIE[self::$sort_cookie] : "";
+
+        $sort_by = explode("|", $sort_by);
+
+        if(empty(self::$sort_types[$sort_by[0]])) {
+            $sort_by = explode("|", self::$sort_types[self::$sort_type_default]);
+            $sort_by = array(self::$sort_type_default, $sort_by[1]);
+        }
+
+        return $sort_by;
+
+        /*
+
+        //from sidebar
+        $sort_by = isset($_COOKIE['x_sort_by']) ? $_COOKIE['x_sort_by'] : "course|asc";
+        $sort_by = explode("|", $sort_by);
+
+        //from index
+        $sort_key = !empty($_POST['sort_by']) ? $_POST['sort_by'] : (!empty($_COOKIE['x_sort_by']) ? $_COOKIE['x_sort_by'] : "");
+        $sort_key = explode("|", $sort_key);
+         *
+        */
+    }
+
+    static function getExpandType() {
+
+        return !empty($_COOKIE['expand']) ? $_COOKIE['expand'] : "normal";
+
+        /*
+
+        //from sidebar
+        $sort_by = isset($_COOKIE['x_sort_by']) ? $_COOKIE['x_sort_by'] : "course|asc";
+        $sort_by = explode("|", $sort_by);
+
+        //from index
+        $sort_key = !empty($_POST['sort_by']) ? $_POST['sort_by'] : (!empty($_COOKIE['x_sort_by']) ? $_COOKIE['x_sort_by'] : "");
+        $sort_key = explode("|", $sort_key);
+         *
+        */
+    }
+
+    function __get($name) {
+    }
+
+    function __set($name,$value) {
+        if(count($this->sub_coursecollections) > 0) {
+            foreach($this->sub_coursecollections as $k=>$v) {
+                $this->sub_coursecollections[$k]->set($name, $value);
+            }
+        }
+
+        $this->_params[$name] = $value;
+    }
+
+    function __construct($selectors = "") {
+        //-- Set stuff up
+
+
+        parent::Model();
+
+        $this->ccdb = new DB();
+
+        //-- Lets clean up the selectors into something we can use
+
+        if($selectors == "") {
+            $this->is_null = true;
+        } elseif(! is_array($selectors)) {
+            $selectors = explode(",", $selectors);
+        }
+
+        $selectors_clean = array();
+
+        $by_quarters = array();
+
+        if(is_array($selectors)) {
+            foreach($selectors as $s) {
+                $clean = Course::split($s);
+                $selectors_clean[] = $clean;
+                $by_quarters[$clean['quarter']][] = $clean;
+                $this->quarter = $clean['quarter'];
+
+            }
+        }
+
+        $this->selectors_clean = $selectors_clean;
+
+        //-- If this spans more than one quarter, create multiple CCs and exit
+
+        if(count($by_quarters) > 1) {
+
+            foreach($by_quarters as $q) {
+
+                $this->sub_coursecollections[] = new CourseCollection($q);
+            }
+            return true;
+        }
+
+        //-- Now, lets find everything
+
+        $this->query_courses = new DB();
+        $this->query_courses_sub = new DB();
+
+        $this->query_courses->select(array('*'));
+        $this->query_courses->from('ritschedule_course_general as cg');
+        //$this->query_courses->join('ritschedule_course as c', array('college','discipline','course'), 'LEFT');
+
+
+        if(!empty($selectors_clean)) {
+
+            $this->query_courses->where("(");
+
+            $columns = array("college", "discipline", "course");
+
+            $columns_count = array(7=>1, 9=>2, 12=>3, 14=>3);
+
+            $selectors_spliced = array();
+            foreach($selectors_clean as $k=>$s) {
+                //$selectors_spliced[] = substr($s['ascii'], 5, 9);
+                $this->query_courses->or_where('concat(cg.`college`,cg.`discipline`,cg.`course`) LIKE "'.substr($s['ascii'], 5, 7).'%"');
+            }
+
+            $this->query_courses->where(")");
+
+        }
+    }
+    /*
+    public function get() {
+        $this->ccdb->from('ritschedule_course');
+
+        if(defined('QUARTER')) {
+            $this->ccdb->where('quarter', QUARTER);
+        }
+
+        //-- Limit
+
+        if(isset($this->_params['limit'])) {
+            $this->ccdb->limit($this->_params['limit']);
+        }
+
+        //-- Get the results from the database
+
+        $results = $this->ccdb->get();
+
+        //-- Now, turn them into course objects
+
+        $courses = array();
+        foreach($results as $c) {
+            $course = new Course();
+            $course->_row = $c;
+            $courses[$c['college'] . $c['discipline'] . $c['course']] = $course;
+        }
+
+        //-- Return them
+
+        return $courses;
+
+    }
+    */
+    public function search($param) {
+
+        /** Multiples? */
+
+        if(count($this->sub_coursecollections) > 0) {
+            foreach($this->sub_coursecollections as $k=>$v) {
+                $this->sub_coursecollections[$k]->search($param);
+            }
+        }
+
+        /* End multiples */
+
+        $this->query_courses_sub->select('concat(college,discipline,course) as course_num');
+        $this->query_courses_sub->from('ritschedule_course_general');
+        $this->query_courses_sub->match(array('`name`', '`desc`', '`tags`'), $param, 'relevancy');
+
+        $results = $this->query_courses_sub->get();
+
+        $this->courses_order = $course_ids = array();
+        foreach($results as $r) {
+            $this->courses_order[$r['course_num']] = $r['relevancy'];
+            $course_ids[] = $r['course_num'];
+        }
+
+
+        $this->query_courses->where('concat(college,discipline,course) IN (' . implode(",", $course_ids) . ')');
+
+        //$this->query_courses->order_by( 'MATCH('.implode(array('cg.`name`', 'cg.`desc`', 'cg.`tags`'), ",").') AGAINST (\'' . $param . '\')', 'DESC' );
+    }
+
+    function getLists( $courses ) {
+
+        $db = new DB();
+        $db->select(array('id', 'courses'));
+        $db->from('ritschedule_group');
+        $db->where('user',USER_ID);
+        $db->where("(");
+        foreach($courses as $c) {
+            $db->or_like('courses',$c);
+        }
+        $db->where(')');
+
+
+        $results =  $db->get();
+
+        $return = array();
+
+        foreach($results as $r) {
+            $extracted_courses = explode(",", $r['courses']);
+            foreach($extracted_courses as $ec) {
+                if($ec != "") {
+                    $return[$ec][$r['id']] = $r['id'];
+                }
+            }
+        }
+
+        return $return;
+
+    }
+
+    function sort( $arg1, $arg2 ) {
+
+
+        /** Multiples? */
+
+        if(count($this->sub_coursecollections) > 0) {
+            foreach($this->sub_coursecollections as $k=>$v) {
+                $this->sub_coursecollections[$k]->sort($arg1, $arg2);
+            }
+        }
+
+        /* End multiples */
+
+        if(is_array($arg1)) { // Sort by array
+            $this->courses_order = $arg1;
+        } else { // Sort by key and value
+            $this->sort_by = array($arg1, $arg2);
+        }
+
+    }
+
+    function results() {
+
+
+        /** Multiples? */
+
+
+        if(count($this->sub_coursecollections) > 0) {
+            $courses = array();
+            foreach($this->sub_coursecollections as $k=>$v) {
+                $courses = array_merge($courses, $this->sub_coursecollections[$k]->results());
+            }
+            return $courses;
+        }
+
+        /* End multiples */
+
+
+        /* PORKCHOP SANDWICHES --Eric */
+
+        //-- Set up variables
+
+        $next_available_ids = array();
+
+        if($this->is_null) {
+            return array();
+        }
+
+        //-- Loop, just to make sure we get everything
+
+        $results_count = false;
+        $results_count_loop = 0;
+        $results_count_max = 750;
+
+        $results_courses = array();
+
+        while($results_count >= $results_count_max || $results_count === false) {
+            $this->query_courses->limit($results_count_loop * $results_count_max, $results_count_max);
+
+            if(!empty($results_courses)) {
+                $results_courses = array_merge($results_courses, $this->query_courses->get());
+            }
+            else {
+                $results_courses = $this->query_courses->get();
+            }
+
+            $results_count = $this->query_courses->count;
+            $results_count_loop++;
+        }
+
+
+
+
+        //echo "<b>Amount:</b> " . count($results_courses);
+
+        $courses = array();
+
+        $this->query_sections = new DB();
+        $this->query_sections->from("ritschedule_{$this->quarter}_section");
+        if(! empty($results_courses)) {
+
+            $sections = array();
+
+            foreach($results_courses as $rc) {
+                $sections[] = $this->quarter.$rc['college'].$rc['discipline'].$rc['course'];
+            }
+
+            $this->query_sections->where('concat(`quarter`,`college`,`discipline`,`course`) IN ('.implode(",", $sections).')');
+
+            $results_sections = $this->query_sections->get();
+
+            //-- Set up section array, and create an array of instructors
+
+            $instructors = array();
+            $sections = array();
+            $course_ids = array();
+
+            if(count($results_sections) > 0 || $this->filter['show_all']) {
+
+                foreach($results_sections as $rs) {
+                    $sections[$this->quarter.$rs['college'].$rs['discipline'].$rs['course']][$rs['section']] = $rs;
+                    $instructors = array_merge($instructors, explode("|", $rs['instructors']));
+                }
+
+                $instructors_found = array_unique($instructors);
+
+                //-- Get instructors from the database
+
+                $instructors = array();
+
+                if(count($instructors_found) > 0) {
+                    $query_instructors = new DB();
+                    $query_instructors->where('id IN ('.implode(",", $instructors_found).')');
+                    $instructors_results = $query_instructors->get('ritschedule_section_instructor');
+
+                    //-- Make them instructor ID the key
+
+                    foreach($instructors_results as $ir) {
+                        $instructors[$ir['id']] = $ir;
+                    }
+                }
+
+
+                foreach($sections as $course_id=>$c) {
+                    foreach($c as $section_id=>$s) {
+                        $section_instructors = explode("|", $s['instructors']);
+                        $temp_instructors = array();
+
+                        foreach($section_instructors as $si) {
+                            $temp_instructors[$instructors[$si]['id']] = $instructors[$si];
+                        }
+
+                        $sections[$course_id][$section_id]['instructors'] = $temp_instructors;
+                    }
+                }
+
+
+                //-- Set up sections
+
+                $all_start = microtime(true);
+
+                foreach($results_courses as $rc) {
+
+                    $course = new Course();
+                    $course->_row = $rc;
+                    $course->quarter = $this->quarter;
+
+                    //-- Save the amount of sections
+
+                    $course->sections_count = isset($sections[$this->quarter.$rc['college'].$rc['discipline'].$rc['course']]) ? count($sections[$this->quarter.$rc['college'].$rc['discipline'].$rc['course']]) : 0;
+
+                    //-- Assume at first it qualifies
+
+                    $course->show = true;
+
+                    //-- Course level
+
+                    if(isset($this->filter['levels'])) {
+                        if(! preg_match('@'.substr($course->val('course'),0,1).'@', $this->filter['levels']) ) {
+                            $course->show = false;
+                        }
+                    }
+
+                    $start = microtime(true);
+
+                    //-- If the course hasn't been eliminated yet...
+                    if($course->show) {
+
+                        //-- Now, lets assume it should be shown
+
+                        $course->show = false;
+
+                        if(!empty($sections[$this->quarter.$rc['college'].$rc['discipline'].$rc['course']])) {
+
+                            $course->setSections($sections[$this->quarter.$rc['college'].$rc['discipline'].$rc['course']]);
+
+                            //if(isset($this->filter["time"])) {
+                            foreach($course->getSections() as $s) {
+
+                                $s->show = true;
+
+                                //-- Options
+
+                                if(isset($this->filter["open"]) && $this->filter["open"] && $s->current >= $s->total) $s->show = false;
+                                if(isset($this->filter["honors"]) && $this->filter["honors"] && !$s->honors) $s->show = false;
+                                if(isset($this->filter["ntid"]) && $this->filter["ntid"] && !strlen($s->ntid)) $s->show = false;
+                                if(isset($this->filter["evening"]) && $this->filter["evening"] && !$s->evening)$s->show = false;
+
+                                if(isset($this->filter["lecture"]) && $this->filter["lecture"] && ($s->online || $s->lab)) $s->show = false;
+                                if(isset($this->filter["online"]) && $this->filter["online"] && !$s->online) $s->show = false;
+                                if(isset($this->filter["lab"]) && $this->filter["lab"] && !$s->lab) $s->show = false;
+
+                                if(isset($this->filter["credits_type"])) {
+                                    if($this->filter["credits_type"] == "=") {
+                                        if($s->credits != $this->filter["credits"]) $s->show = false;
+                                    }
+
+                                    if($this->filter["credits_type"] == ">") {
+                                        $credits = explode("-",$s->credits);
+                                        if($credits[count($credits)-1] < $this->filter["credits"]) $s->show = false;
+                                    }
+                                    if($this->filter["credits_type"] == "<") {
+                                        $credits = explode("-",$s->credits);
+                                        if($credits[0] > $this->filter["credits"]) $s->show = false;
+                                    }
+                                }
+
+
+                                if(isset($this->filter["time"]) && $s->show) {
+                                    //-- Times
+
+                                    /*
+                                    $show = true;
+
+                                    foreach($s->getTimes(true) as $k=>$b) {
+
+                                        if(! isset($this->filter["time"][$k])) {
+                                            $show = false;
+                                        }
+
+                                        if($k == "other") {
+                                            if(Section::timesOther($b, "online") && $this->filter['times_online']) {
+                                                $show = true;
+                                            }
+                                            if(Section::timesOther($b, "tba") && $this->filter['times_tba']) {
+                                                $show = true;
+                                            }
+                                        }
+                                    }
+                                    */
+
+                                    //------start
+                                    if(!empty($_GET['unlikelypartners']) || !empty($_COOKIE['unlikelypartners'])) {
+                                        $diff = array_intersect_key($this->filter["time"], $s->getTimes(true));
+                                        $s->show = $diff == $this->filter["time"];
+
+                                        //var_dump($diff, $s->getTimes(true), $s->show);
+                                        // if($count >= 25) exit();
+
+
+                                    }
+                                    else {
+                                        $diff = array_diff_key($s->getTimes(true), $this->filter["time"]);
+                                        $s->show = empty($diff); //-- account for "other"?
+                                    }
+
+
+                                    if(empty($_GET['unlikelypartners']) && empty($_COOKIE['unlikelypartners'])) {
+                                        if(!empty($diff['other'])) {
+                                            if(Section::timesOther($diff['other'], "online") && $this->filter['times_online']) {
+                                                $s->show = true;
+                                            } elseif(Section::timesOther($diff['other'], "tba") && $this->filter['times_tba']) {
+                                                $s->show = true;
+                                            }
+                                        }
+                                    }
+
+                                    //-------end
+
+
+                                    // if diff is empty, we should show the course!
+
+
+                                    /*
+                                    if($show != $s->show) {
+
+                                    var_dump($s->show, empty($diff), !empty($diff['other']));
+
+                                        echo "<b>ERROR!</b>";
+                                    var_dump($diff);
+
+                                    var_dump($diff);
+                                    var_dump($s->getTimes(true), $this->filter["time"]);
+                                    exit();
+
+                                        echo "<br />";
+                                    }
+                                    */
+
+                                }
+
+                                //-- Show the course?  You betcha
+
+                                if($s->show) {
+                                    $course->show = true;
+                                }
+                            }
+                            //}
+                        }
+                        elseif($this->filter['show_all']) {
+                            $course->show = true;
+                            $next_available_ids[$rc['college'].$rc['discipline'].$rc['course']] = array();
+                        }
+
+                        $course_ids[] = $rc['college'].$rc['discipline'].$rc['course'];
+                        $courses[$rc['college'].$rc['discipline'].$rc['course']] = $course;
+                    }
+
+                    $end = microtime(true);
+
+                    //echo "&nbsp;&nbsp;<b>Time:</b> " . ($end - $start) . "<br />";
+
+                }
+
+
+                //echo "<b>OVERALL</b> " . (microtime(true) - $all_start);
+            }
+        }
+
+
+        //-- Find next available courses
+
+        if($this->filter['show_all']) {
+            $next_available = $this->find_next_available($next_available_ids);
+
+            foreach($courses as $k=>$c) {
+                if(isset($next_available[$k])) {
+                    $courses[$k]->next = $next_available[$k];
+                }
+            }
+        }
+
+        //-- Get lists information
+
+        if(!empty($course_ids)) {
+            $lists = $this->getLists( $course_ids );
+
+            if(!empty($lists)) {
+                foreach($lists as $k=>$list) {
+                    if(isset($courses[$k])) {
+                        $courses[$k]->lists = $list;
+                    }
+                }
+            }
+        }
+
+        $results = array();
+
+        if(!empty($this->courses_order) || !empty($this->sort_by)) {
+            //-- Reorder courses if needed
+            if(!empty($this->sort_by)) {
+                foreach($courses as $c) {
+                    switch($this->sort_by[0]) {
+                        case "alphabetical":
+                            $s_key = $c->name . $c->id("Cdc");
+                            $s_val = $c->name[0];
+                            break;
+                        case "discipline":
+                            $s_key = $c->discipline->name . $c->id("Cdc");
+                            $s_val = $c->discipline->name;
+                            break;
+                        case "relevancy":
+                            $s_key = $this->courses_order[$c->id("Cdc")] . $c->id("Cdc");
+
+                            if($s_key > 4) {
+                                $s_val = "Most Relevant";
+                            } elseif($s_key > 3) {
+                                $s_val = "Very Relevant";
+                            } elseif($s_key > 2) {
+                                $s_val = "Relevant";
+                            } elseif($s_key > 1) {
+                                $s_val = "Somewhat Relevant";
+                            } else {
+                                $s_val = "Barely Relevant";
+                            }
+
+                            break;
+                        case "course": default:
+                            $s_key = $c->id('cCdc');
+                            $s_val = substr($c->id('c'), 0, 1) . "00";
+                            break;
+                    }
+
+                    $c->sort_val = $s_val;
+                    $results[$s_key] = $c;
+                }
+
+                if(empty($this->sort_by[1]) || $this->sort_by[1] == "asc") {
+                    ksort($results);
+                } else {
+                    krsort($results);
+                }
+
+                $courses = $results;
+
+            } else if(!empty($this->courses_order)) {
+                $courses_reordered = array();
+                foreach($this->courses_order as $course_id) {
+                    $courses_reordered[$course_id] = $courses[$course_id];
+                }
+                $courses = $courses_reordered;
+            }
+        }
+
+
+        return $courses;
+    }
+
+    //-- This gets the results, and binds them to the selectors (good for sections)
+    function results_bind() {
+
+        /** Multiples? */
+        if(count($this->sub_coursecollections) > 0) {
+            $results = array();
+            foreach($this->sub_coursecollections as $k=>$v) {
+                $results = array_merge($results, $this->sub_coursecollections[$k]->results());
+            }
+        } else {
+            $results = $this->results();
+        }
+
+        /* End multiples */
+
+
+
+        $return = array();
+
+        foreach($this->selectors_clean as $sc) {
+            foreach($results as $r) {
+                if(preg_match('@'.$r->id.'@', $sc['ascii'])) {
+                    if(!empty($sc['section'])) {
+                        $r->section = $sc['section'];
+                    }
+                    $return[] = $r;
+                }
+            }
+        }
+
+        return $return;
+    }
+
+    function find_next_available($ids) {
+
+        if(!empty($ids)) {
+            $quarters = Quarter::getAll();
+
+            $ids_ascii = array();
+            foreach($ids as $k=>$i) {
+                $ids_ascii[$k] = $k;
+            }
+            $ids_ascii = implode($ids_ascii, ",");
+
+            foreach($quarters as $q) {
+                if($q->id("q") > QUARTER) {
+                    $db = new DB();
+                    $db->select('concat(college,discipline,course) as c');
+                    $db->where("concat(college,discipline,course) IN ({$ids_ascii})");
+                    $db->group_by("c");
+                    $results = $db->get("ritschedule_{$q}_section");
+
+                    foreach($results as $r) {
+                        $ids[$r['c']][] = $q->quarter;
+                    }
+                }
+            }
+        }
+        return $ids;
+    }
+
+    function filter($type, $value) {
+
+        /** Multiples? */
+
+
+        if(count($this->sub_coursecollections) > 0) {
+            foreach($this->sub_coursecollections as $k=>$v) {
+                $this->sub_coursecollections[$k]->filter($type, $value);
+            }
+        }
+
+        /* End multiples */
+
+        if($type == "time") {
+            foreach(explode(",", strtoupper($value)) as $t) {
+                $this->filter["time"][$t] = true;
+            }
+        }
+        else {
+            $this->filter[$type] = $value;
+        }
+
+    }
+}
+
+?>
